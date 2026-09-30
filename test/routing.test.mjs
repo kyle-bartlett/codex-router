@@ -103,7 +103,8 @@ function run(script, env, { nodeArgs = [] } = {}) {
 }
 
 async function waitFor(url, child, headers = {}) {
-  const deadline = Date.now() + 5_000;
+  // Cold router imports can exceed five seconds on a busy developer machine.
+  const deadline = Date.now() + 30_000;
   while (Date.now() < deadline) {
     if (child.exitCode !== null) {
       throw new Error(`Child exited early (${child.exitCode}): ${child.testErrors()}`);
@@ -14011,3 +14012,66 @@ for (const [label, model, generic] of [
     }
   });
 }
+
+
+test("DeepSeek Flash inlines nested connector references without changing other routes", async () => {
+  const requests = [];
+  const gateway = await mockServer(async (request, response) => {
+    requests.push(await bodyJson(request));
+    json(response, 200, { id: "resp_test", object: "response", output: [] });
+  });
+  const stateDir = mkdtempSync(path.join(os.tmpdir(), "routing-deepseek-refs-"));
+  const legacy = JSON.parse(readFileSync(path.join(root, "config/deepseek/deepseek-v4-flashvision-exp.json"), "utf8")).models[0];
+  const userModels = path.join(stateDir, "user-models.json");
+  writeFileSync(userModels, JSON.stringify({ version: 1, models: [{ ...legacy,
+    slug: "deepseek/deepseek-v4.1-flash", gatewayModel: "deepseek-v4-1-flash",
+    upstreamModel: "deepseek-flash", compHash: "deepseek-schema-fixture",
+  }] }));
+  const routerPort = await openPort();
+  const router = run("router.mjs", {
+    CODEX_ROUTER_PORT: String(routerPort),
+    CODEX_ROUTER_GATEWAY_BASE_URL: `http://127.0.0.1:${gateway.port}/v1`,
+    CODEX_ROUTER_QUIET: "1",
+    MODEL_ROUTER_STATE_DIR: stateDir,
+    MODEL_ROUTER_USER_MODELS: userModels,
+    CODEX_HOME: path.join(stateDir, "codex"),
+    CODEX_ROUTER_API_BASE_URL: `http://127.0.0.1:${gateway.port}/v1`,
+  });
+  const recipients = { type: "object", properties: { email: { type: "string" } }, required: ["email"], additionalProperties: false };
+  const tool = { type: "function", name: "connector_createenvelope", parameters: {
+    type: "object", properties: {
+      envelopeDefinition: { type: "object", properties: {
+        compositeTemplates: { type: "array", items: { type: "object", properties: {
+          inlineTemplates: { type: "array", items: { type: "object", properties: { recipients } } },
+        } } },
+        recipients: { $ref: "#/properties/envelopeDefinition/properties/compositeTemplates/items/properties/inlineTemplates/items/properties/recipients", description: "Recipients for this envelope" },
+      } },
+    },
+  } };
+  const original = structuredClone(tool);
+  const broken = { type: "function", name: "broken_connector", parameters: {
+    type: "object", properties: { recipients: { $ref: "#/properties/missing" } },
+  } };
+  async function route(model) {
+    const response = await fetch(`${routerBase(routerPort)}/responses`, {
+      method: "POST", headers: { Authorization: `Bearer ${CALLER_KEY}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ model, input: "test", tools: [tool, broken] }),
+    });
+    assert.equal(response.status, 200, router.testErrors());
+    const sent = requests.at(-1).tools;
+    assert.equal(sent.some((entry) => entry.name === broken.name), model !== "deepseek/deepseek-v4.1-flash");
+    return sent.find((entry) => entry.name === tool.name);
+  }
+  try {
+    await waitFor(`${routerBase(routerPort)}/models`, router);
+    const repaired = await route("deepseek/deepseek-v4.1-flash");
+    assert.deepEqual(repaired.parameters.properties.envelopeDefinition.properties.recipients,
+      { ...recipients, description: "Recipients for this envelope" });
+    assert.deepEqual(await route("opencode-go/glm-5.2"), original);
+    assert.deepEqual(tool, original);
+  } finally {
+    await stopChild(router);
+    await closeServer(gateway.server);
+    rmSync(stateDir, { recursive: true, force: true });
+  }
+});

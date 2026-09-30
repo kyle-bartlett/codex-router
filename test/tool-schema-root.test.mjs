@@ -1234,3 +1234,22 @@ test("null options preserve default cycle blanking", () => {
   const schema = { type: "array", items: { $ref: "#" } };
   assert.deepEqual(nonRecursiveToolSchema(schema, null), { type: "array", items: {} });
 });
+
+
+test("dangling connector refs omit only invalid tools and preserve literals and boolean refs", async () => {
+  const { omitToolsWithDanglingRefs } = await import("../src/tool-schema-root.mjs");
+  const good = { type: "function", name: "good", parameters: {
+    type: "object", $defs: { no: false }, properties: {
+      denied: { $ref: "#/$defs/no" }, label: { type: "string", default: { $ref: "#/missing" } },
+    },
+  } };
+  const bad = { type: "function", name: "bad", parameters: {
+    type: "object", properties: { broken: { $ref: "#/missing" } },
+  } };
+  const original = [good, { type: "namespace", name: "mixed", tools: [good, bad] }, bad];
+  const snapshot = structuredClone(original);
+  assert.deepEqual(omitToolsWithDanglingRefs(original), [good, { type: "namespace", name: "mixed", tools: [good] }]);
+  assert.deepEqual(original, snapshot);
+  const clean = [good];
+  assert.equal(omitToolsWithDanglingRefs(clean), clean);
+});

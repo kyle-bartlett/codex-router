@@ -1,0 +1,1 @@
+- **Direct DeepSeek Flash tolerates malformed connector tool references.** Expand resolvable property references and omit only tool definitions with dangling local pointers before forwarding, so an unrelated malformed connector does not reject a worker task. No permissive schema is substituted; other provider routes and credentials are unchanged.

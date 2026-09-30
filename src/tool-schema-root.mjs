@@ -30,7 +30,7 @@ function isPlainObject(value) {
 // anchors such as `#node`, and unsupported targets remain unresolved. The
 // cycle repair deliberately does not infer semantics for `$dynamicRef` or
 // `$recursiveRef` -- only an actual `$ref` crosses this boundary.
-function resolveRef(ref, root) {
+function resolveRef(ref, root, allowBoolean = false) {
   if (typeof ref !== "string" || !ref.startsWith("#")) return undefined;
   let pointer;
   try {
@@ -57,7 +57,7 @@ function resolveRef(ref, root) {
     if (!isPlainObject(node) || !Object.hasOwn(node, segment)) return undefined;
     node = node[segment];
   }
-  return isPlainObject(node) ? node : undefined;
+  return isPlainObject(node) || (allowBoolean && typeof node === "boolean") ? node : undefined;
 }
 
 // OpenCode's Responses-compatible surfaces reject recursive local refs in a
@@ -1003,4 +1003,44 @@ export function providerToolSchema(schema) {
   // object is null is not a call any of these providers can dispatch.
   if (!hasRootUnion(normalized) && !hasNullableObjectRoot(normalized)) return normalized;
   return objectRootToolSchema(normalized);
+}
+
+
+// A dangling connector pointer rejects the entire direct Flash request. Omit
+// that tool rather than inventing a permissive replacement for its schema.
+// Only inspect schema keywords: refs inside examples/defaults are user data.
+export function omitToolsWithDanglingRefs(tools) {
+  if (!Array.isArray(tools)) return tools;
+  function invalid(schema) {
+    if (!isPlainObject(schema)) return false;
+    const seen = new Set();
+    const pending = [schema];
+    let dangling = false;
+    while (pending.length) {
+      const node = pending.pop();
+      if (seen.has(node)) continue;
+      seen.add(node);
+      // Nested resource IDs change reference scope; do not guess at those.
+      if (node !== schema && typeof node.$id === "string") return false;
+      if (typeof node.$ref === "string" && node.$ref.startsWith("#/")) {
+        if (resolveRef(node.$ref, schema, true) === undefined) dangling = true;
+      }
+      for (const edge of schemaEdges(node, schema)) pending.push(edge.node);
+    }
+    return dangling;
+  }
+  let changed = false;
+  const result = [];
+  for (const tool of tools) {
+    if (tool?.type === "namespace" && Array.isArray(tool.tools)) {
+      const children = omitToolsWithDanglingRefs(tool.tools);
+      if (children !== tool.tools) {
+        changed = true;
+        if (children.length) result.push({ ...tool, tools: children });
+      } else result.push(tool);
+    } else if (invalid(tool?.function?.parameters ?? tool?.parameters ?? tool?.inputSchema)) {
+      changed = true;
+    } else result.push(tool);
+  }
+  return changed ? result : tools;
 }

@@ -63,6 +63,7 @@ import {
   usesHy4NonceMarkup,
   usesLeakedToolCallRecovery,
 } from "./leaked-tool-call-recovery.mjs";
+import { omitToolsWithDanglingRefs } from "./tool-schema-root.mjs";
 import { moonshotSchemaRoute } from "./moonshot-schema-routes.mjs";
 import { reasoningTagStripperTransform } from "./reasoning-tag-stripper.mjs";
 import {
@@ -3665,6 +3666,17 @@ async function buildRoutedRequest({ request, payload, route, agedInput }) {
     // After the namespace flattening above, so the connector tools Codex ships
     // inside `codex_app` are repaired in the shape Moonshot actually receives.
     tools = repairToolSchemaRoots(tools, { inlineForeignRefs: true, declareTypes: true });
+  }
+  if (usesDeepSeekResponses(route)) {
+    // Direct Flash rejects nested property refs in connector schemas (DocuSign).
+    // Inline resolvable references using the existing bounded, lossless repair;
+    // leave other providers unchanged, then reject only malformed tool schemas.
+    tools = repairToolSchemaRoots(tools, { inlineForeignRefs: true });
+    const validTools = omitToolsWithDanglingRefs(tools);
+    if (validTools !== tools) {
+      console.warn("[codex-router] omitted invalid connector tool schemas with dangling local references on direct Flash");
+      tools = validTools;
+    }
   }
   let routedInput = input;
   let routedToolChoice = payload.tool_choice;
